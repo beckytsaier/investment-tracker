@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>投資紀錄</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:#111;display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Noto Sans TC',sans-serif;}
+::-webkit-scrollbar{display:none;}
+input,textarea,button{font-family:inherit;}
+.app{width:min(393px,100vw);height:min(852px,100vh);overflow:hidden;position:relative;background:#0f0f14;color:#f1f1f6;display:flex;flex-direction:column;border-radius:clamp(0px,4vw,48px);box-shadow:0 40px 120px #000a;}
+button{cursor:pointer;}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+<script>
+// ── 顏色 ──
+const C={bg:"#0f0f14",surface:"#1a1a24",card:"#22222f",border:"#2e2e42",accent:"#f97316",accentSoft:"#f9731622",red:"#ef4444",green:"#22c55e",text:"#f1f1f6",muted:"#8888aa"};
+
+// ── 資料 ──
+const TWSE={"2330":"台積電","2317":"鴻海","2454":"聯發科","2412":"中華電","2882":"國泰金","2881":"富邦金","2886":"兆豐金","1301":"台塑","2308":"台達電","3008":"大立光","2002":"中鋼","1303":"南亞","2303":"聯電","2891":"中信金","5880":"合庫金","2884":"玉山金","2885":"元大金","2892":"第一金","2883":"開發金","2890":"永豐金"};
+const N2C=Object.fromEntries(Object.entries(TWSE).map(([k,v])=>[v,k]));
+const STORAGE_KEY="inv-records-v2";
+function load(){try{const r=localStorage.getItem(STORAGE_KEY);return r?JSON.parse(r):{}}catch{return{}}}
+function save(r){try{localStorage.setItem(STORAGE_KEY,JSON.stringify(r))}catch{}}
+
+const TODAY=new Date();
+function dateKey(d){return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
+function todayKey(){return dateKey(TODAY)}
+function daysInMonth(y,m){return new Date(y,m+1,0).getDate()}
+function firstDow(y,m){return new Date(y,m,1).getDay()}
+const WD=["日","一","二","三","四","五","六"];
+const MZ=["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"];
+
+// ── State 管理 ──
+let state={page:"home",records:load(),selDate:todayKey(),calYear:TODAY.getFullYear(),calMonth:TODAY.getMonth(),showPicker:false,showForm:false,editIndex:null,analysisMode:"total"};
+let formDraft={code:"",name:"",stockType:"現股",action:"買入",price:"",reason:"",plType:"無",plAmount:"",returnRate:""};
+let activeNumPad=null;
+
+function setState(patch){Object.assign(state,patch);render();}
+function setForm(patch){Object.assign(formDraft,patch);render();}
+
+// ── DOM helpers ──
+function el(tag,attrs={},children=[]){
+  const e=document.createElement(tag);
+  for(const[k,v]of Object.entries(attrs)){
+    if(k==="style"&&typeof v==="object"){Object.assign(e.style,v);}
+    else if(k.startsWith("on")){e.addEventListener(k.slice(2).toLowerCase(),v);}
+    else e.setAttribute(k,v);
+  }
+  for(const c of children){
+    if(c==null||c===false)continue;
+    e.append(typeof c==="string"||typeof c==="number"?document.createTextNode(c):c);
+  }
+  return e;
+}
+function div(s,ch){return el("div",{style:s},ch||[]);}
+function btn(s,onClick,ch){return el("button",{style:s,onClick},ch||[]);}
+function span(s,text){return el("span",{style:s},[text]);}
+function txt(text){return document.createTextNode(text);}
+
+// ── Mini Pie Chart (canvas) ──
+function drawPie(canvas,data){
+  const ctx=canvas.getContext("2d");
+  const w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=Math.min(w,h)/2-10;
+  ctx.clearRect(0,0,w,h);
+  const total=data.reduce((a,d)=>a+d.value,0);
+  if(!total)return;
+  let start=-Math.PI/2;
+  const colors=[C.red,C.green];
+  data.forEach((d,i)=>{
+    const angle=(d.value/total)*Math.PI*2;
+    ctx.beginPath();ctx.moveTo(cx,cy);
+    ctx.arc(cx,cy,r,start,start+angle);
+    ctx.fillStyle=colors[i];ctx.fill();
+    // label
+    const mid=start+angle/2;
+    const lx=cx+Math.cos(mid)*(r*0.65),ly=cy+Math.sin(mid)*(r*0.65);
+    ctx.fillStyle="#fff";ctx.font="bold 13px 'Noto Sans TC',sans-serif";ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.fillText(`${Math.round(d.value/total*100)}%`,lx,ly);
+    start+=angle;
+  });
+}
+
+// ══════════════ RENDER ══════════════
+function render(){
+  const app=document.getElementById("app");
+  app.innerHTML="";
+  if(state.page==="home") app.append(renderHome());
+  else if(state.page==="daily") app.append(renderDaily());
+  else app.append(renderAnalysis());
+}
+
+// ── Home ──
+function renderHome(){
+  const {calYear,calMonth,showPicker,records}=state;
+  const hasRec=d=>{const k=dateKey(d);return records[k]&&records[k].length>0;};
+  const isToday=d=>dateKey(d)===todayKey();
+
+  // Calendar cells
+  const days=daysInMonth(calYear,calMonth), first=firstDow(calYear,calMonth);
+  const cells=[];
+  for(let i=0;i<first;i++){const d=new Date(calYear,calMonth,-first+i+1);cells.push(dayCell(d,true));}
+  for(let d=1;d<=days;d++)cells.push(dayCell(new Date(calYear,calMonth,d),false));
+  const rem=7-(cells.length%7);if(rem<7)for(let i=1;i<=rem;i++)cells.push(dayCell(new Date(calYear,calMonth+1,i),true));
+  const weeks=[];for(let i=0;i<cells.length;i+=7)weeks.push(div({display:"flex"},cells.slice(i,i+7)));
+
+  function dayCell(d,dim){
+    const k=dateKey(d),dot=hasRec(d),tod=isToday(d);
+    return div({flex:"1",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"6px 0",cursor:"pointer",borderRadius:"12px",background:tod?C.accentSoft:"transparent",opacity:dim?"0.3":"1",userSelect:"none"},[
+      span({fontSize:"16px",fontWeight:tod?"700":"400",color:tod?C.accent:C.text},d.getDate()),
+      div({height:"6px",display:"flex",alignItems:"center",justifyContent:"center"},[
+        dot?div({width:"5px",height:"5px",borderRadius:"50%",background:C.accent}):null
+      ])
+    ]).with(e=>{e.addEventListener("click",()=>setState({page:"daily",selDate:k}));return e;});
+  }
+
+  // Picker rows
+  let pickerEl=null;
+  if(showPicker){
+    const yearSel=el("select",{style:{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"8px 12px",fontSize:"15px"}});
+    for(let y=2010;y<=2040;y++){const o=document.createElement("option");o.value=y;o.textContent=`${y}年`;if(y===calYear)o.selected=true;yearSel.append(o);}
+    yearSel.addEventListener("change",e=>setState({calYear:+e.target.value}));
+
+    const monSel=el("select",{style:{background:C.card,color:C.text,border:`1px solid ${C.border}`,borderRadius:"10px",padding:"8px 12px",fontSize:"15px"}});
+    MZ.forEach((m,i)=>{const o=document.createElement("option");o.value=i;o.textContent=m;if(i===calMonth)o.selected=true;monSel.append(o);});
+    monSel.addEventListener("change",e=>setState({calMonth:+e.target.value}));
+
+    pickerEl=div({display:"flex",justifyContent:"center",alignItems:"center",gap:"12px",padding:"10px 0",borderTop:`1px solid ${C.border}`,borderBottom:`1px solid ${C.border}`,marginBottom:"4px"},[
+      yearSel, span({color:C.muted},"·"), monSel,
+      btn({marginLeft:"8px",padding:"8px 14px",borderRadius:"10px",border:"none",background:C.accent,color:"#fff",fontSize:"13px",fontWeight:"700"},()=>setState({showPicker:false}),["確定"])
+    ]);
+  }
+
+  return div({display:"flex",flexDirection:"column",height:"100%"},[
+    // Header
+    div({padding:"52px 24px 12px",background:C.surface,flexShrink:"0"},[
+      div({display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"},[
+        div({},[
+          span({fontSize:"11px",color:C.muted,letterSpacing:"2px",display:"block",marginBottom:"4px"},"我的投資紀錄"),
+          btn({background:"none",border:"none",padding:"0",display:"flex",alignItems:"center",gap:"6px",cursor:"pointer"},()=>setState({showPicker:!showPicker}),[
+            span({fontSize:"24px",fontWeight:"700",color:C.text},`${calYear} · ${MZ[calMonth]}`),
+            span({fontSize:"13px",color:C.accent,transition:"transform .2s",display:"inline-block",transform:showPicker?"rotate(180deg)":"rotate(0deg)"},"▾")
+          ])
+        ])
+      ]),
+      pickerEl,
+      div({display:"flex"},WD.map(w=>span({flex:"1",textAlign:"center",fontSize:"12px",color:C.muted,paddingBottom:"8px",display:"block"},w)))
+    ]),
+    // Calendar
+    div({flex:"1",overflowY:"auto",padding:"8px 16px 0"},weeks),
+    // Footer
+    div({padding:"16px 24px 36px",background:C.surface,borderTop:`1px solid ${C.border}`,flexShrink:"0"},[
+      btn({width:"100%",padding:"15px",borderRadius:"16px",border:"none",background:`linear-gradient(135deg,${C.accent},#ea580c)`,color:"#fff",fontSize:"16px",fontWeight:"700",boxShadow:"0 4px 20px #f9731640",letterSpacing:"1px"},()=>setState({page:"analysis"}),["📊 投資分析"])
+    ])
+  ]);
+}
+
+// Element helper for chaining
+Element.prototype.with=function(fn){return fn(this)||this;};
+
+// ── Daily ──
+function renderDaily(){
+  const {selDate,records,showForm,editIndex}=state;
+  const dayRecs=records[selDate]||[];
+  const dateObj=new Date(selDate+"T00:00:00");
+  const dateLabel=`${dateObj.getFullYear()}/${dateObj.getMonth()+1}/${dateObj.getDate()}`;
+
+  function plLabel(rec){
+    if(rec.plType==="損益"&&rec.plAmount!==""){const v=parseFloat(rec.plAmount);return isNaN(v)?"":(v>=0?`+${v}`:`${v}`);}return "";
+  }
+  function delRecord(i){
+    const u={...records},l=[...(u[selDate]||[])];l.splice(i,1);u[selDate]=l;
+    setState({records:u});save(u);
+  }
+
+  const cards=dayRecs.map((rec,i)=>{
+    const pl=plLabel(rec), buyColor=rec.action==="買入"?C.red:C.green;
+    const tags=[
+      tagEl(rec.stockType),tagEl(rec.action,buyColor),tagEl(`$${rec.price}`),
+      pl?tagEl(pl,parseFloat(rec.plAmount)>=0?C.red:C.green):null,
+      rec.returnRate?tagEl(`${parseFloat(rec.returnRate)>=0?"+":""}${rec.returnRate}%`,parseFloat(rec.returnRate)>=0?C.red:C.green):null
+    ].filter(Boolean);
+    return div({background:C.card,borderRadius:"16px",padding:"14px 16px",marginBottom:"12px",border:`1px solid ${C.border}`},[
+      div({display:"flex",justifyContent:"space-between",alignItems:"flex-start"},[
+        div({},[span({fontWeight:"700",fontSize:"17px"},rec.code),span({color:C.muted,marginLeft:"8px",fontSize:"14px"},rec.name)]),
+        div({display:"flex",gap:"10px"},[
+          btn({background:"none",border:"none",color:C.accent,fontSize:"13px"},()=>{formDraft={...rec};activeNumPad=null;setState({showForm:true,editIndex:i});}),["編輯"]),
+          btn({background:"none",border:"none",color:C.muted,fontSize:"13px"},()=>delRecord(i),["刪除"])
+        ])
+      ]),
+      div({display:"flex",gap:"8px",marginTop:"8px",flexWrap:"wrap"},tags),
+      rec.reason?span({display:"block",marginTop:"8px",fontSize:"13px",color:C.muted},rec.reason):null
+    ]);
+  });
+
+  const wrapper=div({display:"flex",flexDirection:"column",height:"100%",position:"relative"},[
+    div({padding:"52px 20px 16px",background:C.surface,borderBottom:`1px solid ${C.border}`,flexShrink:"0"},[
+      btn({background:"none",border:"none",color:C.accent,fontSize:"15px",padding:"0",marginBottom:"12px",display:"block"},()=>setState({page:"home",showForm:false}),["‹ 返回"]),
+      div({display:"flex",justifyContent:"space-between",alignItems:"center"},[
+        div({},[span({fontSize:"12px",color:C.muted,display:"block",marginBottom:"2px"},"每日投資紀錄"),span({fontSize:"22px",fontWeight:"700"},dateLabel)]),
+        btn({padding:"10px 18px",borderRadius:"14px",border:"none",background:C.accent,color:"#fff",fontSize:"14px",fontWeight:"600"},()=>{formDraft={code:"",name:"",stockType:"現股",action:"買入",price:"",reason:"",plType:"無",plAmount:"",returnRate:""};activeNumPad=null;setState({showForm:true,editIndex:null});}),["+ 新增紀錄"])
+      ])
+    ]),
+    div({flex:"1",overflowY:"auto",padding:"16px 20px"},[
+      dayRecs.length===0&&!showForm?div({textAlign:"center",color:C.muted,marginTop:"60px",fontSize:"15px"},[txt("今日尚無紀錄"),el("br"),span({fontSize:"12px"},"點擊「新增紀錄」開始")]):null,
+      ...cards
+    ])
+  ]);
+
+  if(showForm) wrapper.append(renderForm());
+  return wrapper;
+}
+
+function tagEl(text,color){
+  return span({display:"inline-block",padding:"3px 10px",borderRadius:"20px",fontSize:"12px",fontWeight:"500",background:C.surface,color:color||C.text,border:`1px solid ${C.border}`},text);
+}
+
+// ── Form ──
+function renderForm(){
+  const {selDate,records,editIndex}=state;
+  const f=formDraft;
+
+  function saveRecord(){
+    if(!f.code&&!f.name){alert("請填寫股票代碼或名稱");return;}
+    if(!f.price){alert("請填寫價格");return;}
+    const u={...records},l=[...(u[selDate]||[])];
+    const rec={...f};
+    if(editIndex!==null)l[editIndex]=rec;else l.push(rec);
+    u[selDate]=l;save(u);
+    setState({records:u,showForm:false,editIndex:null});
+  }
+
+  function lookupCode(){
+    const n=TWSE[f.code.trim()];if(n){setForm({name:n});}
+  }
+  function lookupName(){
+    const c=N2C[f.name.trim()];if(c){setForm({code:c});}
+  }
+
+  function numPadPress(field,v){
+    let p=formDraft[field]||"";
+    if(v==="⌫")p=p.slice(0,-1);
+    else if(v==="+/-")p=p.startsWith("-")?p.slice(1):(p?"-"+p:"-");
+    else if(v===".")p=p.includes(".")?p:p+".";
+    else p=p+v;
+    setForm({[field]:p});
+  }
+
+  function numPad(field){
+    const keys=["7","8","9","4","5","6","1","2","3","+/-","0",".","⌫"];
+    return div({background:C.bg,borderRadius:"16px",padding:"10px",marginTop:"8px"},[
+      div({display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"6px"},[
+        ...keys.map(k=>btn({padding:"12px",borderRadius:"10px",border:"none",background:k==="⌫"?C.loss+"33":C.card,color:C.text,fontSize:"17px",fontWeight:"500"},()=>numPadPress(field,k),[k])),
+        btn({padding:"12px",borderRadius:"10px",border:"none",background:C.accent,color:"#fff",fontSize:"14px",fontWeight:"700"},()=>{activeNumPad=null;render();}),["完成"])
+      ])
+    ]);
+  }
+
+  const actionColor=f.action==="買入"?C.red:C.green;
+  const amtVal=parseFloat(f.plAmount),rateVal=parseFloat(f.returnRate);
+  const hasAmt=f.plType==="損益"&&f.plAmount!=="";
+
+  function inp(val,onChange,placeholder,extra={}){
+    const i=el("input",{style:{...iStyle,...extra},placeholder});
+    i.value=val;
+    i.addEventListener("input",e=>onChange(e.target.value));
+    return i;
+  }
+  function row(label,child){return div({marginBottom:"14px"},[span({display:"block",fontSize:"12px",color:C.muted,marginBottom:"6px",letterSpacing:"0.5px"},label),child]);}
+  function chips(options,current,setter){
+    return div({display:"flex",gap:"8px",flexWrap:"wrap"},options.map(o=>btn({padding:"8px 14px",borderRadius:"10px",border:"none",fontSize:"13px",fontWeight:"500",background:current===o?C.accent:C.card,color:current===o?"#fff":C.muted},()=>setter(o),[o])));
+  }
+
+  const codeInp=inp(f.code,v=>setForm({code:v}),"例：2330");
+  codeInp.addEventListener("blur",lookupCode);
+  const nameInp=inp(f.name,v=>setForm({name:v}),"例：台積電");
+  nameInp.addEventListener("blur",lookupName);
+  const priceInp=inp(f.price,v=>setForm({price:v}),"0.00",{color:actionColor,type:"number"});
+  const reasonTA=el("textarea",{style:{...iStyle,resize:"none",lineHeight:"1.5"},placeholder:"填寫交易理由…",rows:"2"});
+  reasonTA.value=f.reason;
+  reasonTA.addEventListener("input",e=>setForm({reason:e.target.value}));
+
+  // Amount display
+  const amtDisplay=div({...iStyle,cursor:"pointer",minHeight:"44px",display:"flex",alignItems:"center",color:f.plAmount===""?C.muted:(!isNaN(amtVal)&&amtVal>=0?C.red:C.green),borderColor:activeNumPad==="plAmount"?C.accent:C.border,boxShadow:activeNumPad==="plAmount"?`0 0 0 2px ${C.accent}33`:"none"},[
+    span({},f.plAmount!==""?`${(!isNaN(amtVal)&&amtVal>=0)?"+":""}${f.plAmount} 元`:"點擊輸入金額")
+  ]);
+  amtDisplay.addEventListener("click",()=>{activeNumPad=activeNumPad==="plAmount"?null:"plAmount";render();});
+
+  const rateDisplay=div({...iStyle,cursor:"pointer",minHeight:"44px",display:"flex",alignItems:"center",color:f.returnRate===""?C.muted:(!isNaN(rateVal)&&rateVal>=0?C.red:C.green),borderColor:activeNumPad==="returnRate"?C.accent:C.border,boxShadow:activeNumPad==="returnRate"?`0 0 0 2px ${C.accent}33`:"none"},[
+    span({},f.returnRate!==""?`${(!isNaN(rateVal)&&rateVal>=0)?"+":""}${f.returnRate} %`:"點擊輸入報酬率")
+  ]);
+  rateDisplay.addEventListener("click",()=>{activeNumPad=activeNumPad==="returnRate"?null:"returnRate";render();});
+
+  const overlay=div({position:"absolute",inset:"0",background:"#000a",zIndex:"10",display:"flex",alignItems:"flex-end"},[
+    div({width:"100%",background:C.surface,borderRadius:"24px 24px 0 0",padding:"20px 20px 36px",maxHeight:"90%",overflowY:"auto"},[
+      div({display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"},[
+        span({fontSize:"18px",fontWeight:"700"},editIndex!==null?"編輯紀錄":"新增紀錄"),
+        btn({background:"none",border:"none",color:C.muted,fontSize:"22px"},()=>setState({showForm:false,editIndex:null}),["×"])
+      ]),
+      row("股票代碼",codeInp),
+      row("股票名稱",nameInp),
+      row("類型",chips(["現股","融券","融資","零股"],f.stockType,v=>setForm({stockType:v}))),
+      row("操作",div({display:"flex",gap:"8px"},[
+        ...["買入","賣出"].map(a=>btn({padding:"8px 14px",borderRadius:"10px",border:"none",flex:"1",fontSize:"13px",fontWeight:"500",background:f.action===a?(a==="買入"?C.red:C.green):C.card,color:f.action===a?"#fff":C.muted},()=>setForm({action:a}),[a]))
+      ])),
+      row("價格",priceInp),
+      row("交易原因",reasonTA),
+      row("損益",div({},[
+        div({display:"flex",gap:"8px",marginBottom:f.plType==="損益"?"10px":"0"},[
+          ...["無","損益"].map(t=>btn({padding:"8px 14px",borderRadius:"10px",border:"none",flex:"1",fontSize:"13px",fontWeight:"500",background:f.plType===t?C.accent:C.card,color:f.plType===t?"#fff":C.muted},()=>{setForm({plType:t});if(t==="無"){Object.assign(formDraft,{plAmount:"",returnRate:""});activeNumPad=null;render();};},[t]))
+        ]),
+        f.plType==="損益"?div({},[amtDisplay,activeNumPad==="plAmount"?numPad("plAmount"):null]):null
+      ])),
+      hasAmt?row("報酬率",div({},[rateDisplay,activeNumPad==="returnRate"?numPad("returnRate"):null])):null,
+      btn({width:"100%",padding:"15px",borderRadius:"14px",border:"none",background:`linear-gradient(135deg,${C.accent},#ea580c)`,color:"#fff",fontSize:"16px",fontWeight:"700",marginTop:"8px"},saveRecord,["儲存"])
+    ])
+  ]);
+  return overlay;
+}
+
+const iStyle={width:"100%",background:C.card,border:`1px solid ${C.border}`,borderRadius:"12px",padding:"10px 14px",color:C.text,fontSize:"15px",outline:"none",boxSizing:"border-box",display:"block"};
+
+// ── Analysis ──
+function renderAnalysis(){
+  const {records,analysisMode}=state;
+  const now=new Date(),todayK=todayKey(),thisYear=now.getFullYear(),thisMonth=now.getMonth();
+  let profit=0,loss=0,hasAny=false;
+  Object.entries(records).forEach(([dk,recs])=>{
+    const d=new Date(dk+"T00:00:00");
+    const inc=(analysisMode==="total"||(analysisMode==="year"&&d.getFullYear()===thisYear)||(analysisMode==="month"&&d.getFullYear()===thisYear&&d.getMonth()===thisMonth)||(analysisMode==="today"&&dk===todayK));
+    if(!inc)return;
+    recs.forEach(rec=>{if(rec.plType==="損益"&&rec.plAmount!==""){const v=parseFloat(rec.plAmount);if(!isNaN(v)){hasAny=true;if(v>0)profit+=v;else loss+=Math.abs(v);}}});
+  });
+  const net=profit-loss;
+  const modes=[{k:"total",l:"已實現總損益"},{k:"year",l:"年度損益"},{k:"month",l:"當月損益"},{k:"today",l:"當日損益"}];
+
+  const canvasEl=el("canvas",{width:"280",height:"220",style:{display:"block",margin:"0 auto"}});
+
+  setTimeout(()=>{
+    if(hasAny){
+      const data=[{name:"正報酬",value:profit},{name:"損失",value:loss}].filter(d=>d.value>0);
+      drawPie(canvasEl,data);
+    }
+  },0);
+
+  return div({display:"flex",flexDirection:"column",height:"100%"},[
+    div({padding:"52px 20px 16px",background:C.surface,borderBottom:`1px solid ${C.border}`,flexShrink:"0"},[
+      btn({background:"none",border:"none",color:C.accent,fontSize:"15px",padding:"0",marginBottom:"12px",display:"block"},()=>setState({page:"home"}),["‹ 返回"]),
+      span({fontSize:"22px",fontWeight:"700"},"投資分析")
+    ]),
+    div({flex:"1",overflowY:"auto",padding:"20px"},[
+      div({display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px",marginBottom:"24px"},
+        modes.map(({k,l})=>btn({padding:"12px",borderRadius:"14px",border:"none",background:analysisMode===k?C.accent:C.card,color:analysisMode===k?"#fff":C.muted,fontSize:"13px",fontWeight:analysisMode===k?"700":"400",transition:"background .2s"},()=>setState({analysisMode:k}),[l]))
+      ),
+      hasAny?div({textAlign:"center",marginBottom:"16px",padding:"16px",background:C.card,borderRadius:"20px",border:`1px solid ${C.border}`},[
+        span({display:"block",fontSize:"13px",color:C.muted,marginBottom:"6px"},"淨損益"),
+        span({fontSize:"32px",fontWeight:"800",color:net>=0?C.profit:C.loss},`${net>=0?"+":""}${net.toLocaleString()}`)
+      ]):null,
+      !hasAny?div({textAlign:"center",color:C.muted,marginTop:"60px",fontSize:"16px",background:C.card,borderRadius:"20px",padding:"40px",border:`1px solid ${C.border}`},[
+        span({display:"block",fontSize:"40px",marginBottom:"12px"},"📭"),txt("無交易紀錄")
+      ]):div({background:C.card,borderRadius:"20px",padding:"20px",border:`1px solid ${C.border}`},[
+        canvasEl,
+        div({display:"flex",justifyContent:"center",gap:"24px",marginTop:"16px"},[
+          profit>0?div({display:"flex",alignItems:"center",gap:"6px"},[div({width:"10px",height:"10px",borderRadius:"50%",background:C.red,flexShrink:"0"}),span({fontSize:"13px",color:C.muted},`正報酬 +${profit.toLocaleString()}`)]):null,
+          loss>0?div({display:"flex",alignItems:"center",gap:"6px"},[div({width:"10px",height:"10px",borderRadius:"50%",background:C.green,flexShrink:"0"}),span({fontSize:"13px",color:C.muted},`損失 -${loss.toLocaleString()}`)]):null
+        ])
+      ])
+    ])
+  ]);
+}
+
+render();
+</script>
+</body>
+</html>
